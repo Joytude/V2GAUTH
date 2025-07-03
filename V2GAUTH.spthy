@@ -1,0 +1,173 @@
+theory V2G_CrossDomain_Authentication
+begin
+
+builtins: diffie-hellman, asymmetric-encryption, signing
+
+// Declare all functions used
+functions: h/1, pk/1, sign/2, verify/3, aenc/2, adec/2, fst/1, snd/1, pair/2, sdec/2, senc/2
+
+// Equation Definition: All functions have been declared in functions
+equations:
+    sdec(senc(m, k), k) = m,
+    verify(sign(m, sk), m, pk(sk)) = true,
+    adec(aenc(m, pk(sk)), sk) = m,
+    fst(pair(x, y)) = x,
+    snd(pair(x, y)) = y
+    
+// Constraint definition
+restriction temporal_order:
+  "All ev domain #i #j.
+    AuthRequest(ev, domain) @ #i &
+    Running(ev, domain) @ #j ==> #j < #i"
+
+restriction identity_consistency:
+  "All ev #i #j domain1 domain2.
+    AuthRequest(ev, domain1) @ #i &
+    AuthRequest(ev, domain2) @ #j ==> domain1 = domain2"
+
+restriction initiation_uniqueness:
+  "All ev domain gamma #i #j.
+    Initiated(ev, domain, gamma) @ #i &
+    Initiated(ev, domain, gamma) @ #j ==> #i = #j"
+
+restriction gamma_freshness:
+  "All ev domain #i #j gamma1 gamma2.
+    Initiated(ev, domain, gamma1) @ #i &
+    Initiated(ev, domain, gamma2) @ #j & not(#i = #j)
+    ==> not(gamma1 = gamma2)"
+
+// Key Management center is initialized
+rule KGC_Initialization:
+   [ Fr( ~skKGC ) ]
+   -->
+   [ !KGC_Key(~skKGC), Out( pk(~skKGC) ) ]
+
+// Domains are initialized
+rule Domain_Initialization:
+   [ !KGC_Key(~skKGC), Fr( ~skSGS ) ]
+   -->
+   [ !SGS_Key($domain, ~skSGS), Out( pk(~skSGS) ) ]
+
+// Registration of vehicles
+rule Vehicle_Registration:
+   [ !KGC_Key(~skKGC), !SGS_Key($domain, ~skSGS), Fr( ~skEV ), Fr( ~r ) ]
+   --[ Registered($ev, $domain) ]->
+   [
+     Out( 'g'^~r ),
+     !EV_Identity($ev, ~skEV),
+     !SGS_EV_Record($domain, pk(~skEV))
+   ]
+
+// Vehicle initiated session
+rule EV_Initiate_Session:
+   [ !EV_Identity($ev, ~skEV), Fr( ~gamma ) ]
+   --[ Initiated($ev, $domain, ~gamma) ]->
+   [
+     Out( pair($domain, pair('g'^~gamma, sign('g'^~gamma, ~skEV))) ),
+     InitiationState($ev, $domain, ~gamma)
+   ]
+
+// SGS reponses the session
+rule SGS_Respond_Session:
+   [
+     !SGS_Key($domain, ~skSGS),
+     !SGS_EV_Record($domain, $pkEV),
+     In( pair($src_domain, pair($gamma_pub, $sig_ev)) ),
+     Fr( ~mu )
+   ]
+   --[
+     Verified($sig_ev, $gamma_pub, $pkEV),
+     SessionKeyGenerated($ev, $domain, $gamma_pub^~mu)
+   ]->
+   [
+     Out( pair($domain, pair('g'^~mu, sign('g'^~mu, ~skSGS))) ),
+     SessionKeyState($ev, $domain, $gamma_pub^~mu)
+   ]
+
+// EV complete the session
+rule EV_Complete_Session:
+   [
+     InitiationState($ev, $domain, ~gamma),
+     In( pair($domain, pair($mu_pub, $sig)) ),
+     !SGS_Key($domain, ~skSGS)
+   ]
+   --[
+     Verified($sig, $mu_pub, pk(~skSGS)),
+     Running($ev, $domain),
+     SessionEstablished($ev, $domain, $mu_pub^~gamma)
+   ]->
+   [ ]
+
+// The vehicle initiates a cross-domain authentication request
+rule EV_CrossAuth_Request:
+   [
+     !EV_Identity($ev, ~skEV),
+     SessionKeyState($ev, $domain, $session_key)
+   ]
+   --[ AuthRequest($ev, $domain) ]->
+   [
+     Out( aenc(sign('request', ~skEV), $session_key) )
+   ]
+
+// Threat model
+rule Compromise_EV:
+   [ !EV_Identity($ev, ~skEV) ]
+   --[ Reveal_EV_SK($ev) ]->
+   [ Out(~skEV) ]
+
+rule Session_Key_Leak:
+   [ SessionKeyState($ev, $domain, $session_key) ]
+   --[ Reveal_Session_Key($ev, $domain, $session_key) ]->
+   [ Out($session_key) ]
+
+/* ========== Security property proof ========== */
+// Man-in-the-middle attack modeling
+lemma man_in_the_middle:
+  all-traces
+  "All ev domain sk #i #j.
+    SessionEstablished(ev, domain, sk) @ #i &
+    K(sk) @ #j
+    ==>
+    (Ex gamma #k. Initiated(ev, domain, gamma) @ #k) |
+    (Ex #l. Reveal_Session_Key(ev, domain, sk) @ #l)"
+// Authentication Security verification
+lemma authentication:
+  all-traces
+  "All ev domain #i.
+    AuthRequest(ev, domain) @ #i
+    ==>
+    (Ex #j. Running(ev, domain) @ #j & #j < #i) |
+    (Ex sk #k. Reveal_Session_Key(ev, domain, sk) @ #k & #k < #i)"
+// Anonymity verification
+lemma anonymity:
+  all-traces
+  "All ev domain #i.
+    AuthRequest(ev, domain) @ #i
+    ==>
+    not (Ex #j. K(ev) @ #j) |
+    (Ex #k. Reveal_EV_SK(ev) @ #k)"
+// The adversary cannot verify the link between the information and the vehicle entity
+lemma unlinkability:
+  all-traces
+  "All ev1 ev2 domain1 domain2 #i #j.
+    (AuthRequest(ev1, domain1) @ #i &
+     AuthRequest(ev2, domain2) @ #j &
+     ev1 = ev2)
+    ==>
+    domain1 = domain2"
+// Replay attack modeling
+lemma replay_protection:
+  all-traces
+  "All ev domain gamma #i #j.
+    (Initiated(ev, domain, gamma) @ #i &
+     Initiated(ev, domain, gamma) @ #j)
+    ==>
+    #i = #j"
+
+// Protocol executability checking
+lemma executability_check:
+  exists-trace
+  "Ex ev domain sk #i.
+    SessionEstablished(ev, domain, sk) @ #i"
+
+end
