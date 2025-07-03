@@ -3,6 +3,6 @@ Automated verification of the paper _"Research on Anonymous Cross-Domain Based o
 You can run and test the protocol by  
 ```Bash
 $brew install tamarin-prover  
-$tamarin-prover V2GAUTH.spthy --prove.  
+$tamarin-prover V2GAUTH.spthy --prove
 ```
 Furthermore you can use the GUI window provided by tamarin to learn about the steps of verification.
